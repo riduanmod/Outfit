@@ -29,8 +29,11 @@ def fetch_player_info(uid: str):
 
 def fetch_and_process_image(image_url: str, size: tuple = None):
     try:
-        resp = session.get(image_url, timeout=IMAGE_TIMEOUT)
-        resp.raise_for_status()
+        # Added User-Agent for better compatibility with some image servers
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = session.get(image_url, headers=headers, timeout=IMAGE_TIMEOUT)
+        if resp.status_code != 200:
+            return None
         img = Image.open(BytesIO(resp.content)).convert("RGBA")
         if size:
             img = img.resize(size, Image.LANCZOS)
@@ -54,45 +57,48 @@ def outfit_image():
     if player_data is None:
         return jsonify({'error': 'Failed to fetch player info'}), 500
 
-    # স্মার্ট ডেটা চেকিং: যদি ডেটা কোনো 'data' কি-এর ভেতর থাকে
     core_data = player_data
     if "EquippedItemsInfo" not in core_data and "data" in core_data:
         core_data = core_data.get("data", {})
 
     outfit_ids = core_data.get("EquippedItemsInfo", {}).get("EquippedOutfit", []) or []
 
-    # যদি ইউজার debug=true প্যারামিটার ব্যবহার করে, তবে আমরা দেখতে পারবো API থেকে কী ডেটা আসছে
+    # Prepare list of items to fetch directly from user's equipped list
+    fetch_list = []
+    used_ids = set()
+    
+    for oid in outfit_ids:
+        str_oid = str(oid)
+        if str_oid not in used_ids:
+            fetch_list.append(str_oid)
+            used_ids.add(str_oid)
+
+    # If the user has less than 7 items, pad with default fallback items
+    fallback_ids = ["211000000", "214000000", "208000000", "203000000", "204000000", "205000000", "212000000"]
+    for fb in fallback_ids:
+        if len(fetch_list) >= 7:
+            break
+        if fb not in used_ids:
+            fetch_list.append(fb)
+            used_ids.add(fb)
+
+    # Only process up to 7 items for the 7 available slots
+    fetch_list = fetch_list[:7]
+
     if debug_mode:
         return jsonify({
             'status': 'Debug Mode',
-            'api_keys_found': list(core_data.keys()),
-            'outfit_ids_extracted': outfit_ids,
-            'raw_api_response': player_data
+            'original_outfit_ids': outfit_ids,
+            'final_fetch_list': fetch_list
         })
 
-    required_starts = ["211", "214", "211", "203", "204", "205", "203"]
-    fallback_ids = ["211000000", "214000000", "208000000", "203000000", "204000000", "205000000", "212000000"]
-    used_ids = set()
-
-    def fetch_outfit_image(idx, code):
-        matched = None
-        for oid in outfit_ids:
-            try:
-                str_oid = str(oid)
-            except Exception:
-                continue
-            if str_oid.startswith(code) and str_oid not in used_ids:
-                matched = str_oid
-                used_ids.add(str_oid)
-                break
-        if matched is None:
-            matched = fallback_ids[idx]
-        image_url = f'https://iconapi.wasmer.app/{matched}'
+    def fetch_outfit_image(oid):
+        image_url = f'https://iconapi.wasmer.app/{oid}'
         return fetch_and_process_image(image_url, size=(150, 150))
 
     futures = []
-    for idx, code in enumerate(required_starts):
-        futures.append(executor.submit(fetch_outfit_image, idx, code))
+    for oid in fetch_list:
+        futures.append(executor.submit(fetch_outfit_image, oid))
 
     bg_path = os.path.join(os.path.dirname(__file__), BACKGROUND_FILENAME)
     try:
@@ -155,3 +161,4 @@ def outfit_image():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+            
